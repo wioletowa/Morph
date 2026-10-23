@@ -114,6 +114,19 @@ pub fn tr(en: &'static str) -> &'static str {
         }
         "the file has no audio track" => "в файле нет звуковой дорожки",
         "the file has no video track" => "в файле нет видеодорожки",
+        "Hardware Acceleration" => "Аппаратное ускорение",
+        "Video is encoded on the GPU when it supports the chosen codec; otherwise, or if the GPU fails, on the CPU" => {
+            "Видео кодируется на видеокарте, если она поддерживает выбранный кодек; иначе или при сбое — на процессоре"
+        }
+        "Video Encoding" => "Кодирование видео",
+        "CPU Only" => "Только процессор",
+        "VAAPI Device" => "Устройство VAAPI",
+        "Detected" => "Найдено",
+        "Checking…" => "Проверка…",
+        "no working encoder" => "нет рабочего кодировщика",
+        "no working encoder; install intel-media-driver" => "нет рабочего кодировщика; установите intel-media-driver",
+        "No supported GPU found" => "Поддерживаемых видеокарт не найдено",
+        "GPU failed" => "сбой GPU",
         e => e,
     }
 }

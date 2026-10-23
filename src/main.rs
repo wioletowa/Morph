@@ -2,6 +2,7 @@ mod card;
 mod config;
 mod convert;
 mod formats;
+mod gpu;
 mod i18n;
 mod media;
 mod prefs;
@@ -104,7 +105,7 @@ mod test {
                 }
                 delay = 100;
             }
-            "dump" => println!("--- state\n{}", app.debug_state()),
+            "dump" => println!("--- state\n{}\n[gpu] {}", app.debug_state(), app.gpu_summary().replace('\n', " | ")),
             "size" => {
                 let (w, h) = arg.split_once('x').unwrap_or(("760", "620"));
                 app.window.set_default_size(w.parse().unwrap_or(760), h.parse().unwrap_or(620));

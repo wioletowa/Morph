@@ -4,6 +4,7 @@ use crate::card::{Item, State};
 use crate::config::{self, Config};
 use crate::convert::{self, ImageOptions};
 use crate::formats::{self, Kind};
+use crate::gpu::{self, Accel, GpuInfo, VaapiDevice};
 use crate::media::{self, Probe};
 use crate::i18n::tr;
 use crate::tools::Tools;
@@ -38,6 +39,8 @@ pub struct App {
     reserved: RefCell<HashSet<PathBuf>>,
     thumbs: RefCell<VecDeque<Weak<Item>>>,
     thumbs_running: Cell<usize>,
+    /// None until the startup GPU probe finishes; video jobs wait for it.
+    pub gpu: RefCell<Option<GpuInfo>>,
 }
 
 impl App {
@@ -130,12 +133,14 @@ impl App {
             reserved: RefCell::new(HashSet::new()),
             thumbs: RefCell::new(VecDeque::new()),
             thumbs_running: Cell::new(0),
+            gpu: RefCell::new(None),
         });
         this.load_css();
         this.setup_actions();
         this.setup_drop(&view);
         this.build_set_all_menu();
         this.update();
+        this.detect_gpu();
 
         let w = Rc::downgrade(&this);
         this.window.connect_close_request(move |win| {
@@ -378,7 +383,7 @@ impl App {
         };
         while self.running.get() < jobs {
             // Video encoders already use every core, so they get their own, smaller limit.
-            let video_full = self.running_video.get() >= video_jobs;
+            let video_full = self.running_video.get() >= video_jobs || self.gpu.borrow().is_none();
             let next = self.items.borrow().iter().find(|i| i.state.get() == State::Queued && !(video_full && heavy(i))).cloned();
             let Some(item) = next else { break };
             self.start(item);
@@ -455,11 +460,94 @@ impl App {
     async fn convert_media(&self, item: &Rc<Item>, tmp: &Path, target: &str, opts: &media::MediaOptions) -> Result<(), String> {
         let probe = self.probe(item).await?;
         let ffmpeg = self.tools.ffmpeg.clone().ok_or_else(|| tr("ffmpeg is not installed").to_string())?;
-        let argv = media::ffmpeg_argv(&ffmpeg, &item.path, tmp, item.kind, target, opts, &probe)?;
+        let accel = match media::video_codec(target, opts).filter(|_| !formats::is_audio_target(target)) {
+            Some(codec) => {
+                let c = self.config.borrow();
+                self.gpu.borrow().as_ref().map_or(Accel::Cpu, |g| g.choose(&c.gpu_mode, &c.vaapi_device, codec))
+            }
+            None => Accel::Cpu,
+        };
+        let argv = media::ffmpeg_argv(&ffmpeg, &item.path, tmp, item.kind, target, opts, &probe, &accel)?;
         if item.cancelled.get() {
             return Err(tr("Cancelled").into());
         }
+        let video = media::video_codec(target, opts).is_some() && !formats::is_audio_target(target);
+        item.engine.replace(video.then(|| accel.label().to_string()));
+        let result = run_ffmpeg(item, &argv, probe.duration).await;
+        if result.is_ok() || accel == Accel::Cpu || item.cancelled.get() {
+            return result;
+        }
+        // The GPU path can fail on inputs the probe could not foresee; the CPU always works.
+        let gpu_error = result.unwrap_err();
+        glib::g_message!("morph", "{} failed on {}, retrying on CPU: {gpu_error}", accel.label(), item.path.display());
+        item.engine.replace(Some(format!("CPU · {}", tr("GPU failed"))));
+        item.show_progress(Some(0.0), None, None);
+        let argv = media::ffmpeg_argv(&ffmpeg, &item.path, tmp, item.kind, target, opts, &probe, &Accel::Cpu)?;
         run_ffmpeg(item, &argv, probe.duration).await
+    }
+
+    fn detect_gpu(self: &Rc<Self>) {
+        let Some(ffmpeg) = self.tools.ffmpeg.clone() else {
+            self.gpu.replace(Some(GpuInfo::default()));
+            return;
+        };
+        let app = self.clone();
+        glib::spawn_future_local(async move {
+            let encoders = run(None, &[ffmpeg.clone().into(), "-hide_banner".into(), "-encoders".into()]).await.unwrap_or_default();
+            let encoders = gpu::parse_encoders(&encoders);
+            let has = |e: &str| encoders.iter().any(|x| x == e);
+            let mut info = GpuInfo { nvidia_name: gpu::nvidia_name(), ..Default::default() };
+            for codec in gpu::CODECS {
+                if has(gpu::nvenc_encoder(codec)) && codec != "vp9" && run(None, &gpu::nvenc_test_argv(&ffmpeg, codec)).await.is_ok() {
+                    info.nvenc.push(codec);
+                }
+            }
+            for (path, vendor) in gpu::render_nodes() {
+                let mut dev = VaapiDevice { path, vendor, codecs: Vec::new() };
+                for codec in gpu::CODECS {
+                    if !has(gpu::vaapi_encoder(codec)) {
+                        continue;
+                    }
+                    if run(None, &gpu::vaapi_test_argv(&ffmpeg, &dev.path, codec)).await.is_ok() {
+                        dev.codecs.push(codec);
+                    } else if dev.codecs.is_empty() && codec == "h264" {
+                        // No H.264 usually means no working VA driver at all; skip the rest.
+                        break;
+                    }
+                }
+                info.vaapi.push(dev);
+            }
+            glib::g_message!("morph", "GPU: {info:?}");
+            app.gpu.replace(Some(info));
+            app.pump();
+        });
+    }
+
+    /// One line per accelerator for the preferences page.
+    pub fn gpu_summary(&self) -> String {
+        let gpu = self.gpu.borrow();
+        let Some(g) = gpu.as_ref() else { return tr("Checking…").into() };
+        let names = |c: &[&str]| c.iter().map(|c| codec_label(c)).collect::<Vec<_>>().join(", ");
+        let mut lines = Vec::new();
+        if let Some(name) = &g.nvidia_name {
+            let codecs = if g.nvenc.is_empty() { tr("no working encoder").to_string() } else { names(&g.nvenc) };
+            lines.push(format!("NVENC ({name}): {codecs}"));
+        }
+        for d in &g.vaapi {
+            let node = d.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let codecs = if !d.codecs.is_empty() {
+                names(&d.codecs)
+            } else if d.vendor == "Intel" {
+                tr("no working encoder; install intel-media-driver").to_string()
+            } else {
+                tr("no working encoder").to_string()
+            };
+            lines.push(format!("VAAPI {} ({node}): {codecs}", d.vendor));
+        }
+        if lines.is_empty() {
+            lines.push(tr("No supported GPU found").into());
+        }
+        lines.join("\n")
     }
 
     /// Probes media files and renders card thumbnails, a couple at a time.
@@ -653,6 +741,15 @@ async fn run_ffmpeg(item: &Rc<Item>, argv: &[OsString], duration: Option<f64>) -
     let err = stderr.await.unwrap_or_default();
     waited.map_err(|e| e.message().to_string())?;
     if p.is_successful() { Ok(()) } else { Err(error_text(&err)) }
+}
+
+fn codec_label(c: &str) -> &'static str {
+    match c {
+        "h265" => "H.265",
+        "av1" => "AV1",
+        "vp9" => "VP9",
+        _ => "H.264",
+    }
 }
 
 fn error_text(stderr: &str) -> String {

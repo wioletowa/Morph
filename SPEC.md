@@ -35,7 +35,9 @@ Rust + GTK4 + libadwaita. Лицензия **MIT**.
 - NVIDIA: `-hwaccel cuda -hwaccel_output_format cuda`, `scale_cuda`, `h264_nvenc`/`hevc_nvenc`/`av1_nvenc` (AV1 — только Ada+; T2000/Turing его не умеет → проверяется пробой, а не по списку).
 - VAAPI: `-hwaccel vaapi -vaapi_device …`, `scale_vaapi`, `*_vaapi`.
 - Если GPU-энкод упал — автоматический повтор на CPU с пометкой в карточке.
-- VP9/webm на NVIDIA нет энкодера → CPU (libvpx/libsvtav1), декод всё равно на GPU.
+- VP9/webm на NVIDIA нет энкодера → CPU (libvpx-vp9).
+- Если NVDEC не берёт поток (4:4:4, редкий кодек), декод идёт на CPU, кадры загружаются в NVENC/VAAPI («гибрид»).
+- Статус (этап 3): NVENC H.264/H.265 проверен на T2000. VAAPI-пайплайн написан, но на машине разработки не проверен — для Intel UHD 630 нет `intel-media-driver`.
 
 ## UI
 

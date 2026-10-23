@@ -37,6 +37,8 @@ pub struct Item {
     pub output: RefCell<Option<PathBuf>>,
     pub proc: RefCell<Option<gio::Subprocess>>,
     pub probe: RefCell<Option<Probe>>,
+    /// Which encoder the current or last video conversion used, e.g. "NVENC".
+    pub engine: RefCell<Option<String>>,
     targets: &'static [&'static str],
 }
 
@@ -118,6 +120,7 @@ impl Item {
             output: RefCell::new(None),
             proc: RefCell::new(None),
             probe: RefCell::new(None),
+            engine: RefCell::new(None),
             targets,
         };
         if !item.set_target(target) || item.target() == src {
@@ -175,7 +178,11 @@ impl Item {
                 let new = out.metadata().map_or(0, |m| m.len());
                 let pct = if self.size > 0 { (new as f64 / self.size as f64 - 1.0) * 100.0 } else { 0.0 };
                 let sign = if pct > 0.0 { "+" } else { "−" };
-                self.subtitle.set_label(&format!("{name} · {} ({sign}{:.0}%)", human_size(new), pct.abs()));
+                let mut text = format!("{name} · {} ({sign}{:.0}%)", human_size(new), pct.abs());
+                if let Some(e) = self.engine.borrow().as_ref() {
+                    text += &format!(" · {e}");
+                }
+                self.subtitle.set_label(&text);
                 self.subtitle.set_tooltip_text(Some(&out.to_string_lossy()));
             }
             State::Failed => {}
@@ -224,6 +231,9 @@ impl Item {
         }
         if let Some(s) = speed {
             parts.push(format!("{s:.1}×"));
+        }
+        if let Some(e) = self.engine.borrow().as_ref() {
+            parts.push(e.clone());
         }
         self.subtitle.set_label(&parts.join(" · "));
     }

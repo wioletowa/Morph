@@ -1,6 +1,7 @@
 //! Audio and video through ffmpeg: probing, command lines, progress parsing.
 
 use crate::formats::{self, Kind};
+use crate::gpu::{self, Accel};
 use crate::i18n::tr;
 use std::ffi::OsString;
 use std::path::Path;
@@ -14,6 +15,9 @@ pub struct Probe {
     pub has_video: bool,
     pub has_audio: bool,
     pub has_cover: bool,
+    /// Codec and pixel format of the main video stream, e.g. "h264" and "yuv420p".
+    pub vcodec: String,
+    pub pix_fmt: String,
 }
 
 #[derive(Debug, Clone)]
@@ -30,7 +34,7 @@ pub struct MediaOptions {
 }
 
 pub fn probe_argv(ffprobe: &Path, src: &Path) -> Vec<OsString> {
-    let mut v: Vec<OsString> = ["-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height:stream_disposition=attached_pic", "-of", "flat"]
+    let mut v: Vec<OsString> = ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,pix_fmt,width,height:stream_disposition=attached_pic", "-of", "flat"]
         .iter()
         .map(OsString::from)
         .collect();
@@ -42,7 +46,16 @@ pub fn probe_argv(ffprobe: &Path, src: &Path) -> Vec<OsString> {
 /// Parses `ffprobe -of flat` output.
 pub fn parse_probe(text: &str) -> Probe {
     let mut p = Probe::default();
-    let mut streams: std::collections::BTreeMap<String, (String, u32, u32, bool)> = Default::default();
+    #[derive(Default)]
+    struct Stream {
+        ty: String,
+        codec: String,
+        pix_fmt: String,
+        width: u32,
+        height: u32,
+        cover: bool,
+    }
+    let mut streams: std::collections::BTreeMap<u32, Stream> = Default::default();
     for line in text.lines() {
         let Some((key, val)) = line.split_once('=') else { continue };
         let val = val.trim_matches('"');
@@ -52,22 +65,26 @@ pub fn parse_probe(text: &str) -> Probe {
         }
         let Some(rest) = key.strip_prefix("streams.stream.") else { continue };
         let Some((idx, field)) = rest.split_once('.') else { continue };
-        let s = streams.entry(idx.to_string()).or_default();
+        let Ok(idx) = idx.parse() else { continue };
+        let s = streams.entry(idx).or_default();
         match field {
-            "codec_type" => s.0 = val.to_string(),
-            "width" => s.1 = val.parse().unwrap_or(0),
-            "height" => s.2 = val.parse().unwrap_or(0),
-            "disposition.attached_pic" => s.3 = val == "1",
+            "codec_type" => s.ty = val.to_string(),
+            "codec_name" => s.codec = val.to_string(),
+            "pix_fmt" => s.pix_fmt = val.to_string(),
+            "width" => s.width = val.parse().unwrap_or(0),
+            "height" => s.height = val.parse().unwrap_or(0),
+            "disposition.attached_pic" => s.cover = val == "1",
             _ => {}
         }
     }
-    for (ty, w, h, cover) in streams.into_values() {
-        match ty.as_str() {
+    for s in streams.into_values() {
+        match s.ty.as_str() {
             "audio" => p.has_audio = true,
-            "video" if cover => p.has_cover = true,
+            "video" if s.cover => p.has_cover = true,
             "video" if !p.has_video => {
                 p.has_video = true;
-                (p.width, p.height) = (w, h);
+                (p.width, p.height) = (s.width, s.height);
+                (p.vcodec, p.pix_fmt) = (s.codec, s.pix_fmt);
             }
             _ => {}
         }
@@ -89,11 +106,41 @@ fn scale_args(max: u32) -> String {
     }
 }
 
-pub fn ffmpeg_argv(ffmpeg: &Path, src: &Path, dst: &Path, kind: Kind, target: &str, o: &MediaOptions, p: &Probe) -> Result<Vec<OsString>, String> {
+/// The codec family a video target is encoded with, or None for formats with a fixed CPU
+/// encoder (GIF, AVI).
+pub fn video_codec<'a>(target: &str, o: &'a MediaOptions) -> Option<&'a str> {
+    match target {
+        "webm" => Some("vp9"),
+        "mp4" | "mkv" | "mov" => Some(o.codec.as_str()),
+        _ => None,
+    }
+}
+
+/// `accel` applies only to targets with a `video_codec`; pass `Accel::Cpu` otherwise.
+pub fn ffmpeg_argv(ffmpeg: &Path, src: &Path, dst: &Path, kind: Kind, target: &str, o: &MediaOptions, p: &Probe, accel: &Accel) -> Result<Vec<OsString>, String> {
     let mut v: Vec<OsString> = vec![ffmpeg.into()];
-    push(&mut v, &["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats", "-i"]);
-    v.push(src.into());
+    push(&mut v, &["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats"]);
     let kbps = format!("{}k", o.audio_kbps.clamp(32, 320));
+    let codec = video_codec(target, o).filter(|_| !formats::is_audio_target(target));
+    // Decoding on the GPU keeps frames there for scaling and encoding; streams the decoder
+    // cannot take are decoded in software and uploaded instead.
+    let gpu_frames = gpu::hw_decodable(&p.vcodec, &p.pix_fmt);
+    match (accel, codec) {
+        (Accel::Nvenc, Some(_)) if gpu_frames => push(&mut v, &["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]),
+        (Accel::Vaapi(dev), Some(_)) => {
+            if gpu_frames {
+                push(&mut v, &["-hwaccel", "vaapi", "-hwaccel_device"]);
+                v.push(dev.into());
+                push(&mut v, &["-hwaccel_output_format", "vaapi"]);
+            } else {
+                v.push("-vaapi_device".into());
+                v.push(dev.into());
+            }
+        }
+        _ => {}
+    }
+    v.push("-i".into());
+    v.push(src.into());
 
     if formats::is_audio_target(target) {
         if !p.has_audio {
@@ -114,54 +161,71 @@ pub fn ffmpeg_argv(ffmpeg: &Path, src: &Path, dst: &Path, kind: Kind, target: &s
             "flac" => push(&mut v, &["-c:a", "flac"]),
             _ => {} // wav/aiff: ffmpeg's default PCM for the container
         }
-    } else {
-        if !p.has_video {
-            return Err(tr("the file has no video track").into());
-        }
-        if target == "gif" {
+        v.push(dst.into());
+        return Ok(v);
+    }
+
+    if !p.has_video {
+        return Err(tr("the file has no video track").into());
+    }
+    let crf = o.crf.clamp(0, 51);
+    let scale = scale_args(o.max_height);
+    match (target, codec, accel) {
+        ("gif", ..) => {
             let max = if o.max_height == 0 { 480 } else { o.max_height.min(480) };
             let vf = format!(
                 "[0:v:0]fps=15,scale={}:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4[out]",
                 scale_args(max)
             );
             push(&mut v, &["-filter_complex", &vf, "-map", "[out]", "-loop", "0"]);
-        } else {
-            push(&mut v, &["-map", "0:v:0", "-map", "0:a?", "-vf", &format!("scale={}", scale_args(o.max_height)), "-pix_fmt", "yuv420p"]);
-            let crf = o.crf.clamp(0, 51);
-            match target {
-                "webm" => {
+        }
+        ("avi", ..) => {
+            let q = ((crf as i32 - 14) / 3).clamp(2, 12).to_string();
+            push(&mut v, &["-map", "0:v:0", "-map", "0:a?", "-vf", &format!("scale={scale}"), "-pix_fmt", "yuv420p"]);
+            push(&mut v, &["-c:v", "mpeg4", "-q:v", &q, "-c:a", "libmp3lame", "-b:a", &kbps]);
+        }
+        (_, Some(c), Accel::Nvenc) => {
+            let vf = if gpu_frames { format!("scale_cuda={scale}:format=yuv420p") } else { format!("scale={scale},format=yuv420p") };
+            let preset = match o.speed.as_str() { "fast" => "p2", "slow" => "p6", _ => "p4" };
+            let cq = match c { "h265" => crf + 4, "av1" => crf + 10, _ => crf }.min(51);
+            push(&mut v, &["-map", "0:v:0", "-map", "0:a?", "-vf", &vf]);
+            push(&mut v, &["-c:v", gpu::nvenc_encoder(c), "-preset", preset, "-tune", "hq", "-rc", "vbr", "-cq", &cq.to_string(), "-b:v", "0"]);
+        }
+        (_, Some(c), Accel::Vaapi(_)) => {
+            let vf = if gpu_frames { format!("scale_vaapi={scale}:format=nv12") } else { format!("scale={scale},format=nv12,hwupload") };
+            // h264/hevc take a QP; vp9 and av1 a 0–255 quantiser index.
+            let q = match c { "h265" => (crf + 3).min(51), "vp9" | "av1" => ((crf + 8) * 4).min(255), _ => crf };
+            push(&mut v, &["-map", "0:v:0", "-map", "0:a?", "-vf", &vf]);
+            push(&mut v, &["-c:v", gpu::vaapi_encoder(c), "-rc_mode", "CQP", "-global_quality", &q.to_string()]);
+        }
+        (_, c, _) => {
+            push(&mut v, &["-map", "0:v:0", "-map", "0:a?", "-vf", &format!("scale={scale}"), "-pix_fmt", "yuv420p"]);
+            let preset = match o.speed.as_str() { "fast" => "veryfast", "slow" => "slow", _ => "medium" };
+            match c.unwrap_or("h264") {
+                "vp9" => {
                     let cpu = match o.speed.as_str() { "fast" => "5", "slow" => "1", _ => "3" };
                     push(&mut v, &["-c:v", "libvpx-vp9", "-crf", &(crf + 8).min(63).to_string(), "-b:v", "0", "-row-mt", "1", "-deadline", "good", "-cpu-used", cpu]);
-                    push(&mut v, &["-c:a", "libopus", "-b:a", &kbps]);
                 }
-                "avi" => {
-                    let q = ((crf as i32 - 14) / 3).clamp(2, 12).to_string();
-                    push(&mut v, &["-c:v", "mpeg4", "-q:v", &q, "-c:a", "libmp3lame", "-b:a", &kbps]);
+                "h265" => push(&mut v, &["-c:v", "libx265", "-crf", &(crf + 5).min(51).to_string(), "-preset", preset, "-x265-params", "log-level=error"]),
+                "av1" => {
+                    let p = match o.speed.as_str() { "fast" => "10", "slow" => "5", _ => "8" };
+                    push(&mut v, &["-c:v", "libsvtav1", "-crf", &(crf + 12).min(63).to_string(), "-preset", p]);
                 }
-                _ => {
-                    let preset = match o.speed.as_str() { "fast" => "veryfast", "slow" => "slow", _ => "medium" };
-                    match o.codec.as_str() {
-                        "h265" => {
-                            push(&mut v, &["-c:v", "libx265", "-crf", &(crf + 5).min(51).to_string(), "-preset", preset, "-x265-params", "log-level=error"]);
-                            if target != "mkv" {
-                                push(&mut v, &["-tag:v", "hvc1"]);
-                            }
-                        }
-                        "av1" => {
-                            let p = match o.speed.as_str() { "fast" => "10", "slow" => "5", _ => "8" };
-                            push(&mut v, &["-c:v", "libsvtav1", "-crf", &(crf + 12).min(63).to_string(), "-preset", p]);
-                        }
-                        _ => push(&mut v, &["-c:v", "libx264", "-crf", &crf.to_string(), "-preset", preset]),
-                    }
-                    push(&mut v, &["-c:a", "aac", "-b:a", &kbps]);
-                    if target == "mkv" {
-                        push(&mut v, &["-map", "0:s?", "-c:s", "copy"]);
-                    } else {
-                        push(&mut v, &["-movflags", "+faststart"]);
-                    }
-                }
+                _ => push(&mut v, &["-c:v", "libx264", "-crf", &crf.to_string(), "-preset", preset]),
             }
         }
+    }
+    match target {
+        "webm" => push(&mut v, &["-c:a", "libopus", "-b:a", &kbps]),
+        "mkv" => push(&mut v, &["-c:a", "aac", "-b:a", &kbps, "-map", "0:s?", "-c:s", "copy"]),
+        "mp4" | "mov" => {
+            push(&mut v, &["-c:a", "aac", "-b:a", &kbps, "-movflags", "+faststart"]);
+            if codec == Some("h265") {
+                // Apple players only accept HEVC tagged hvc1.
+                push(&mut v, &["-tag:v", "hvc1"]);
+            }
+        }
+        _ => {}
     }
     v.push(dst.into());
     Ok(v)
@@ -220,8 +284,9 @@ mod tests {
         let p = parse_probe(t);
         assert!(p.has_audio && p.has_cover && !p.has_video);
         assert_eq!(p.duration, Some(184.5));
-        let p = parse_probe("streams.stream.0.codec_type=\"video\"\nstreams.stream.0.width=1280\nstreams.stream.0.height=720\nformat.duration=\"N/A\"\n");
+        let p = parse_probe("streams.stream.0.codec_type=\"video\"\nstreams.stream.0.codec_name=\"h264\"\nstreams.stream.0.pix_fmt=\"yuv420p\"\nstreams.stream.0.width=1280\nstreams.stream.0.height=720\nformat.duration=\"N/A\"\n");
         assert!(p.has_video && p.duration.is_none());
+        assert_eq!((p.vcodec.as_str(), p.pix_fmt.as_str()), ("h264", "yuv420p"));
         assert_eq!((p.width, p.height), (1280, 720));
     }
 

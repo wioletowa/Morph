@@ -101,6 +101,32 @@ pub fn show(app: &Rc<App>) {
         });
     }
 
+    let hw = adw::PreferencesGroup::builder()
+        .title(tr("Hardware Acceleration"))
+        .description(tr("Video is encoded on the GPU when it supports the chosen codec; otherwise, or if the GPU fails, on the CPU"))
+        .build();
+    hw.add(&choice_row(
+        app,
+        tr("Video Encoding"),
+        None,
+        &[("auto", tr("Automatic")), ("nvidia", "NVIDIA NVENC"), ("vaapi", "VAAPI (Intel, AMD)"), ("cpu", tr("CPU Only"))],
+        &c.gpu_mode,
+        |c, v| c.gpu_mode = v.into(),
+    ));
+    let nodes: Vec<(String, String)> = crate::gpu::render_nodes()
+        .into_iter()
+        .map(|(p, vendor)| {
+            let node = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            (p.to_string_lossy().into_owned(), format!("{vendor} ({node})"))
+        })
+        .collect();
+    let mut choices: Vec<(&str, &str)> = vec![("", tr("Automatic"))];
+    choices.extend(nodes.iter().map(|(p, l)| (p.as_str(), l.as_str())));
+    hw.add(&choice_row(app, tr("VAAPI Device"), None, &choices, &c.vaapi_device, |c, v| c.vaapi_device = v.into()));
+    let detected = adw::ActionRow::builder().title(tr("Detected")).subtitle(app.gpu_summary()).subtitle_selectable(true).build();
+    hw.add(&detected);
+    page.add(&hw);
+
     let video = adw::PreferencesGroup::builder().title(tr("Video")).build();
     let codec = choice_row(app, tr("Codec"), Some(tr("For MP4, MKV and MOV")), &[("h264", "H.264"), ("h265", "H.265 (HEVC)"), ("av1", "AV1")], &c.video_codec, |c, v| c.video_codec = v.into());
     let crf = adw::SpinRow::builder()
@@ -196,7 +222,7 @@ fn choice_row(
     app: &Rc<App>,
     title: &str,
     subtitle: Option<&str>,
-    choices: &[(&'static str, &str)],
+    choices: &[(&str, &str)],
     current: &str,
     set: fn(&mut Config, &str),
 ) -> adw::ComboRow {
@@ -209,7 +235,7 @@ fn choice_row(
     if let Some(s) = subtitle {
         row.set_subtitle(s);
     }
-    let values: Vec<&'static str> = choices.iter().map(|(v, _)| *v).collect();
+    let values: Vec<String> = choices.iter().map(|(v, _)| v.to_string()).collect();
     let app = app.clone();
     row.connect_selected_notify(move |r| {
         let Some(v) = values.get(r.selected() as usize) else { return };

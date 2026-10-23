@@ -24,6 +24,10 @@ pub struct Config {
     pub video_max_height: u32,
     pub video_jobs: u32,
     pub audio_kbps: u32,
+    /// "auto", "nvidia", "vaapi" or "cpu".
+    pub gpu_mode: String,
+    /// Render node for VAAPI; empty picks the first that works.
+    pub vaapi_device: String,
     pub width: i32,
     pub height: i32,
 }
@@ -45,6 +49,8 @@ impl Default for Config {
             video_max_height: 0,
             video_jobs: 1,
             audio_kbps: 192,
+            gpu_mode: "auto".into(),
+            vaapi_device: String::new(),
             width: 760,
             height: 620,
         }
@@ -94,6 +100,8 @@ impl Config {
                 "video_max_height" => c.video_max_height = v.parse().unwrap_or(0),
                 "video_jobs" => c.video_jobs = v.parse().unwrap_or(c.video_jobs).clamp(1, 8),
                 "audio_kbps" => c.audio_kbps = v.parse().unwrap_or(c.audio_kbps).clamp(32, 320),
+                "gpu_mode" => c.gpu_mode = v.into(),
+                "vaapi_device" => c.vaapi_device = v.into(),
                 "width" => c.width = v.parse().unwrap_or(c.width),
                 "height" => c.height = v.parse().unwrap_or(c.height),
                 _ => {}
@@ -124,7 +132,7 @@ impl Config {
         let out = self.output_dir.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let text = format!(
             "lang={}\noutput_dir={out}\nimage_quality={}\nkeep_metadata={}\njobs={}\nimage_target={}\naudio_target={}\n\
-             video_target={}\nvideo_codec={}\nvideo_crf={}\nvideo_speed={}\nvideo_max_height={}\nvideo_jobs={}\naudio_kbps={}\n\
+             video_target={}\nvideo_codec={}\nvideo_crf={}\nvideo_speed={}\nvideo_max_height={}\nvideo_jobs={}\naudio_kbps={}\ngpu_mode={}\nvaapi_device={}\n\
              width={}\nheight={}\n",
             self.lang,
             self.image_quality,
@@ -139,6 +147,8 @@ impl Config {
             self.video_max_height,
             self.video_jobs,
             self.audio_kbps,
+            self.gpu_mode,
+            self.vaapi_device,
             self.width,
             self.height,
         );
