@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.wioletowa.Morph</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Morph</name>
+  <summary>Convert images, audio and video locally</summary>
+  <summary xml:lang="ru">Конвертирует изображения, аудио и видео локально</summary>
+  <developer id="io.github.wioletowa">
+    <name>wioletowa</name>
+  </developer>
+  <description>
+    <p>
+      Morph converts files on your own computer: drop them in, pick a format, and convert.
+      Nothing is uploaded.
+    </p>
+    <ul>
+      <li>Images: PNG, JPEG, WebP, AVIF, HEIC, JPEG XL, GIF, TIFF, BMP; also reads SVG, PSD and camera RAW</li>
+      <li>Audio: MP3, FLAC, Ogg, Opus, WAV, M4A, AIFF, keeping tags and album art</li>
+      <li>Video: MP4, MKV, WebM, MOV, AVI and GIF, or extract the soundtrack</li>
+      <li>Video encoding on the GPU with NVIDIA NVENC or VAAPI (Intel, AMD), falling back to the CPU</li>
+    </ul>
+    <p>
+      Morph is an independent program inspired by VERT. It runs vips and ffmpeg to do the conversions.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.wioletowa.Morph.desktop</launchable>
+  <provides>
+    <binary>morph</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <branding>
+    <color type="primary" scheme_preference="light">#b7a6f2</color>
+    <color type="primary" scheme_preference="dark">#3d2a6e</color>
+  </branding>
+  <releases>
+    <release version="0.1.0" date="2026-10-23">
+      <description>
+        <p>First release: images, audio and video, with NVENC and VAAPI video encoding.</p>
+      </description>
+    </release>
+  </releases>
+</component>

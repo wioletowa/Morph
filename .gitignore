@@ -1,1 +1,5 @@
 /target
+# makepkg
+/src
+/pkg
+*.pkg.tar.*

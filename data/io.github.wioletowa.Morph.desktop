@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Morph
+GenericName=File Converter
+GenericName[ru]=Конвертер файлов
+Comment=Convert images, audio and video on your computer
+Comment[ru]=Конвертирует изображения, аудио и видео на вашем компьютере
+Exec=morph %F
+Icon=io.github.wioletowa.Morph
+Terminal=false
+StartupNotify=true
+Categories=Utility;
+Keywords=convert;converter;image;audio;video;webp;avif;mp4;mp3;
+Keywords[ru]=конвертер;конвертировать;изображение;аудио;видео;
+MimeType=image/png;image/jpeg;image/webp;image/avif;image/heic;image/heif;image/jxl;image/gif;image/tiff;image/bmp;image/svg+xml;image/vnd.microsoft.icon;image/x-tga;image/vnd.adobe.photoshop;image/jp2;image/x-exr;image/x-portable-pixmap;image/x-portable-graymap;image/x-portable-bitmap;image/x-portable-anymap;image/x-adobe-dng;image/x-canon-cr2;image/x-canon-cr3;image/x-nikon-nef;image/x-sony-arw;image/x-olympus-orf;image/x-panasonic-rw2;image/x-fuji-raf;audio/mpeg;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/x-opus+ogg;audio/wav;audio/x-wav;audio/mp4;audio/x-m4a;audio/aac;audio/x-aiff;audio/x-ms-wma;audio/x-ape;audio/x-wavpack;audio/AMR;audio/x-matroska;audio/ac3;video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/x-m4v;video/x-ms-wmv;video/x-flv;video/mpeg;video/mp2t;video/3gpp;video/ogg;
