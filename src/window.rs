@@ -624,8 +624,7 @@ impl App {
     fn about(&self) {
         let about = adw::AboutDialog::builder()
             .application_name("Morph")
-            // TODO(stage 5): own icon, installed as io.github.wioletowa.Morph.
-            .application_icon("document-send-symbolic")
+            .application_icon(crate::APP_ID)
             .developer_name("wioletowa")
             .version(env!("CARGO_PKG_VERSION"))
             .license_type(gtk::License::MitX11)

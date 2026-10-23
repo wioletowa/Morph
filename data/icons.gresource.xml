@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <!-- GtkApplication adds <resource base path>/icons to the icon theme. -->
+  <gresource prefix="/io/github/wioletowa/Morph/icons">
+    <file preprocess="xml-stripblanks" alias="scalable/apps/io.github.wioletowa.Morph.svg">hicolor/scalable/apps/io.github.wioletowa.Morph.svg</file>
+  </gresource>
+</gresources>

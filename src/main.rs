@@ -17,6 +17,10 @@ use std::rc::Rc;
 const APP_ID: &str = "io.github.wioletowa.Morph";
 
 fn main() -> glib::ExitCode {
+    let res = gio::Resource::from_data(&glib::Bytes::from_static(include_bytes!(concat!(env!("OUT_DIR"), "/icons.gresource"))))
+        .expect("bundled icons");
+    gio::resources_register(&res);
+
     let lang = config::Config::load().lang;
     if lang == "en" || lang == "ru" {
         // So GTK and libadwaita's own strings follow the chosen language too.
@@ -38,6 +42,8 @@ fn main() -> glib::ExitCode {
             w
         }
     };
+
+    app.connect_startup(|_| gtk::Window::set_default_icon_name(APP_ID));
 
     let g = get.clone();
     app.connect_activate(move |app| {
