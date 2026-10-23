@@ -5,11 +5,13 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Default)]
 pub struct Tools {
     pub vips: Option<PathBuf>,
+    pub ffmpeg: Option<PathBuf>,
+    pub ffprobe: Option<PathBuf>,
 }
 
 impl Tools {
     pub fn detect() -> Self {
-        Tools { vips: find("vips") }
+        Tools { vips: find("vips"), ffmpeg: find("ffmpeg"), ffprobe: find("ffprobe") }
     }
 }
 

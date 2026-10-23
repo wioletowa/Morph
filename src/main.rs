@@ -3,6 +3,7 @@ mod config;
 mod convert;
 mod formats;
 mod i18n;
+mod media;
 mod prefs;
 mod tools;
 mod window;

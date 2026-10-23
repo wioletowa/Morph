@@ -1,5 +1,6 @@
 //! Preferences dialog. Every change is written to the config at once.
 
+use crate::config::Config;
 use crate::i18n::tr;
 use crate::window::App;
 use adw::prelude::*;
@@ -100,6 +101,60 @@ pub fn show(app: &Rc<App>) {
         });
     }
 
+    let video = adw::PreferencesGroup::builder().title(tr("Video")).build();
+    let codec = choice_row(app, tr("Codec"), Some(tr("For MP4, MKV and MOV")), &[("h264", "H.264"), ("h265", "H.265 (HEVC)"), ("av1", "AV1")], &c.video_codec, |c, v| c.video_codec = v.into());
+    let crf = adw::SpinRow::builder()
+        .title(tr("Quality (CRF)"))
+        .subtitle(tr("Lower means better quality and bigger files; 23 is a good default"))
+        .adjustment(&gtk::Adjustment::new(c.video_crf as f64, 0.0, 51.0, 1.0, 5.0, 0.0))
+        .build();
+    let speed = choice_row(app, tr("Encoding Speed"), Some(tr("Slower gives smaller files at the same quality")), &[("fast", tr("Fast")), ("medium", tr("Balanced")), ("slow", tr("Slow"))], &c.video_speed, |c, v| c.video_speed = v.into());
+    let height = c.video_max_height.to_string();
+    let res = choice_row(
+        app,
+        tr("Maximum Resolution"),
+        None,
+        &[("0", tr("Original")), ("2160", "2160p (4K)"), ("1440", "1440p"), ("1080", "1080p"), ("720", "720p"), ("480", "480p")],
+        &height,
+        |c, v| c.video_max_height = v.parse().unwrap_or(0),
+    );
+    let video_jobs = adw::SpinRow::builder()
+        .title(tr("Simultaneous Video Conversions"))
+        .adjustment(&gtk::Adjustment::new(c.video_jobs as f64, 1.0, 4.0, 1.0, 1.0, 0.0))
+        .build();
+    for r in [codec.upcast_ref::<gtk::Widget>(), crf.upcast_ref(), speed.upcast_ref(), res.upcast_ref(), video_jobs.upcast_ref()] {
+        video.add(r);
+    }
+    page.add(&video);
+    {
+        let app = app.clone();
+        crf.connect_value_notify(move |r| {
+            let mut c = app.config.borrow_mut();
+            c.video_crf = r.value() as u32;
+            c.save();
+        });
+    }
+    {
+        let app = app.clone();
+        video_jobs.connect_value_notify(move |r| {
+            let mut c = app.config.borrow_mut();
+            c.video_jobs = r.value() as u32;
+            c.save();
+        });
+    }
+
+    let audio = adw::PreferencesGroup::builder().title(tr("Audio")).build();
+    let kbps = c.audio_kbps.to_string();
+    audio.add(&choice_row(
+        app,
+        tr("Bitrate"),
+        Some(tr("For MP3, AAC, Ogg and Opus; FLAC, WAV and AIFF are lossless")),
+        &[("128", "128 kbit/s"), ("192", "192 kbit/s"), ("256", "256 kbit/s"), ("320", "320 kbit/s")],
+        &kbps,
+        |c, v| c.audio_kbps = v.parse().unwrap_or(192),
+    ));
+    page.add(&audio);
+
     let general = adw::PreferencesGroup::builder().title(tr("General")).build();
     let max_jobs = std::thread::available_parallelism().map_or(4, |n| n.get()) as f64;
     let jobs = adw::SpinRow::builder()
@@ -134,4 +189,33 @@ pub fn show(app: &Rc<App>) {
     }
 
     dialog.present(Some(&app.window));
+}
+
+/// A combo row over fixed `(value, label)` pairs that writes the picked value to the config.
+fn choice_row(
+    app: &Rc<App>,
+    title: &str,
+    subtitle: Option<&str>,
+    choices: &[(&'static str, &str)],
+    current: &str,
+    set: fn(&mut Config, &str),
+) -> adw::ComboRow {
+    let labels: Vec<&str> = choices.iter().map(|(_, l)| *l).collect();
+    let row = adw::ComboRow::builder()
+        .title(title)
+        .model(&gtk::StringList::new(&labels))
+        .selected(choices.iter().position(|(v, _)| *v == current).unwrap_or(0) as u32)
+        .build();
+    if let Some(s) = subtitle {
+        row.set_subtitle(s);
+    }
+    let values: Vec<&'static str> = choices.iter().map(|(v, _)| *v).collect();
+    let app = app.clone();
+    row.connect_selected_notify(move |r| {
+        let Some(v) = values.get(r.selected() as usize) else { return };
+        let mut c = app.config.borrow_mut();
+        set(&mut c, v);
+        c.save();
+    });
+    row
 }

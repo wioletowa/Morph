@@ -3,6 +3,7 @@
 use crate::convert::human_size;
 use crate::formats::{self, Kind};
 use crate::i18n::tr;
+use crate::media::{self, Probe};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::{Cell, RefCell};
@@ -25,6 +26,7 @@ pub struct Item {
     pub row: gtk::ListBoxRow,
     pub icon: gtk::Image,
     pub subtitle: gtk::Label,
+    pub progress: gtk::ProgressBar,
     pub target: gtk::DropDown,
     pub spinner: adw::Spinner,
     pub done_icon: gtk::Image,
@@ -34,6 +36,7 @@ pub struct Item {
     pub cancelled: Cell<bool>,
     pub output: RefCell<Option<PathBuf>>,
     pub proc: RefCell<Option<gio::Subprocess>>,
+    pub probe: RefCell<Option<Probe>>,
     targets: &'static [&'static str],
 }
 
@@ -41,7 +44,8 @@ impl Item {
     pub fn new(id: u64, path: PathBuf, kind: Kind, target: &str) -> Self {
         let size = path.metadata().map_or(0, |m| m.len());
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let targets = formats::targets(kind);
+        let src = formats::canonical(&formats::ext_of(&path)).to_string();
+        let targets = formats::targets(kind, &src);
 
         let icon = gtk::Image::builder().pixel_size(48).css_classes(["morph-thumb"]).build();
         let (ctype, _) = gio::content_type_guess(Some(&path), None);
@@ -62,6 +66,8 @@ impl Item {
         let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).valign(gtk::Align::Center).build();
         text.append(&title);
         text.append(&subtitle);
+        let progress = gtk::ProgressBar::builder().visible(false).margin_top(4).build();
+        text.append(&progress);
 
         let labels: Vec<String> = targets.iter().map(|t| formats::label(t)).collect();
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -101,6 +107,7 @@ impl Item {
             row,
             icon,
             subtitle,
+            progress,
             target: target_dd,
             spinner,
             done_icon,
@@ -110,9 +117,9 @@ impl Item {
             cancelled: Cell::new(false),
             output: RefCell::new(None),
             proc: RefCell::new(None),
+            probe: RefCell::new(None),
             targets,
         };
-        let src = formats::canonical(&formats::ext_of(&item.path)).to_string();
         if !item.set_target(target) || item.target() == src {
             // Converting to the same format is allowed, but not a useful default.
             let other = targets.iter().position(|t| *t != src).unwrap_or(0);
@@ -142,8 +149,12 @@ impl Item {
     }
 
     pub fn set_state(&self, s: State) {
+        if s != State::Running {
+            self.progress.set_fraction(0.0);
+        }
         self.state.set(s);
-        self.spinner.set_visible(s == State::Running);
+        self.spinner.set_visible(s == State::Running && self.progress.fraction() == 0.0);
+        self.progress.set_visible(s == State::Running && self.progress.fraction() > 0.0);
         self.done_icon.set_visible(s == State::Done);
         self.open_btn.set_visible(s == State::Done);
         self.target.set_sensitive(!self.busy());
@@ -152,8 +163,7 @@ impl Item {
         let running = s == State::Running;
         self.remove_btn.set_icon_name(if running { "process-stop-symbolic" } else { "window-close-symbolic" });
         self.remove_btn.set_tooltip_text(Some(if running { tr("Cancel") } else { tr("Remove") }));
-        let src = formats::label(&formats::ext_of(&self.path));
-        let base = format!("{src} · {}", human_size(self.size));
+        let base = self.describe();
         match s {
             State::Idle => self.subtitle.set_label(&base),
             State::Queued => self.subtitle.set_label(&format!("{base} · {}", tr("Waiting…"))),
@@ -170,6 +180,52 @@ impl Item {
             }
             State::Failed => {}
         }
+    }
+
+    /// "MP4 · 12.0 MB · 1920×1080 · 1:23", with whatever the probe found.
+    fn describe(&self) -> String {
+        let mut parts = vec![formats::label(&formats::ext_of(&self.path)), human_size(self.size)];
+        if let Some(p) = self.probe.borrow().as_ref() {
+            if p.has_video && p.width > 0 {
+                parts.push(format!("{}×{}", p.width, p.height));
+            }
+            if let Some(d) = p.duration {
+                parts.push(media::clock(d));
+            }
+        }
+        parts.join(" · ")
+    }
+
+    pub fn set_probe(&self, p: Probe) {
+        self.probe.replace(Some(p));
+        if self.state.get() == State::Idle {
+            self.subtitle.set_label(&self.describe());
+        }
+    }
+
+    /// Shows ffmpeg progress; `fraction` is None when the duration is unknown.
+    pub fn show_progress(&self, fraction: Option<f64>, eta: Option<f64>, speed: Option<f64>) {
+        let mut parts = Vec::new();
+        match fraction {
+            Some(f) => {
+                let f = f.clamp(0.001, 1.0);
+                self.progress.set_fraction(f);
+                parts.push(format!("{:.0}%", f * 100.0));
+            }
+            None => {
+                self.progress.pulse();
+                parts.push(tr("Converting…").to_string());
+            }
+        }
+        self.spinner.set_visible(false);
+        self.progress.set_visible(true);
+        if let Some(e) = eta {
+            parts.push(tr("{} left").replace("{}", &media::clock(e)));
+        }
+        if let Some(s) = speed {
+            parts.push(format!("{s:.1}×"));
+        }
+        self.subtitle.set_label(&parts.join(" · "));
     }
 
     pub fn fail(&self, msg: &str) {

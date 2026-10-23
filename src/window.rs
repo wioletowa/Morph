@@ -4,6 +4,7 @@ use crate::card::{Item, State};
 use crate::config::{self, Config};
 use crate::convert::{self, ImageOptions};
 use crate::formats::{self, Kind};
+use crate::media::{self, Probe};
 use crate::i18n::tr;
 use crate::tools::Tools;
 use adw::prelude::*;
@@ -32,6 +33,7 @@ pub struct App {
     items: RefCell<Vec<Rc<Item>>>,
     next_id: Cell<u64>,
     running: Cell<usize>,
+    running_video: Cell<usize>,
     /// Output paths claimed by running jobs, so two inputs never race for one name.
     reserved: RefCell<HashSet<PathBuf>>,
     thumbs: RefCell<VecDeque<Weak<Item>>>,
@@ -67,11 +69,15 @@ impl App {
 
         let choose = gtk::Button::builder().label(tr("Choose Files…")).halign(gtk::Align::Center).css_classes(["pill", "suggested-action"]).build();
         choose.set_action_name(Some("win.add"));
-        let description = if tools.vips.is_some() {
-            tr("Files are converted on this computer. Nothing is uploaded.").to_string()
-        } else {
-            tr("vips is not installed, so images cannot be converted. Install the libvips package.").to_string()
-        };
+        let mut description = tr("Images, audio and video are converted on this computer. Nothing is uploaded.").to_string();
+        if tools.vips.is_none() {
+            description += "\n";
+            description += tr("vips is not installed, so images cannot be converted. Install the libvips package.");
+        }
+        if tools.ffmpeg.is_none() || tools.ffprobe.is_none() {
+            description += "\n";
+            description += tr("ffmpeg is not installed, so audio and video cannot be converted. Install the ffmpeg package.");
+        }
         let empty = adw::StatusPage::builder()
             .icon_name("document-send-symbolic")
             .title(tr("Drop Files to Convert"))
@@ -120,6 +126,7 @@ impl App {
             items: RefCell::new(Vec::new()),
             next_id: Cell::new(1),
             running: Cell::new(0),
+            running_video: Cell::new(0),
             reserved: RefCell::new(HashSet::new()),
             thumbs: RefCell::new(VecDeque::new()),
             thumbs_running: Cell::new(0),
@@ -196,10 +203,14 @@ impl App {
 
     fn build_set_all_menu(&self) {
         let menu = gio::Menu::new();
-        for t in formats::targets(Kind::Image) {
-            let item = gio::MenuItem::new(Some(&formats::label(t)), None);
-            item.set_action_and_target_value(Some("win.set-all"), Some(&t.to_variant()));
-            menu.append_item(&item);
+        for (kind, title) in [(Kind::Image, tr("Images")), (Kind::Video, tr("Video")), (Kind::Audio, tr("Audio"))] {
+            let section = gio::Menu::new();
+            for (_, t) in formats::all_targets().filter(|(k, _)| *k == kind) {
+                let item = gio::MenuItem::new(Some(&formats::label(t)), None);
+                item.set_action_and_target_value(Some("win.set-all"), Some(&t.to_variant()));
+                section.append_item(&item);
+            }
+            menu.append_section(Some(title), &section);
         }
         self.set_all.set_menu_model(Some(&menu));
     }
@@ -242,9 +253,7 @@ impl App {
             }
             let id = self.next_id.get();
             self.next_id.set(id + 1);
-            let target = match kind {
-                Kind::Image => self.config.borrow().image_target.clone(),
-            };
+            let target = self.config.borrow().target_for(kind).to_string();
             let item = Rc::new(Item::new(id, p, kind, &target));
             self.wire(&item);
             self.list.append(&item.row);
@@ -256,8 +265,8 @@ impl App {
             let msg = tr("Skipped {} unsupported file(s)").replace("{}", &skipped.to_string());
             self.toast(&msg);
         }
-        if added > 0 && self.tools.vips.is_none() {
-            self.toast(tr("vips is not installed"));
+        if let Some(msg) = self.missing_tool().filter(|_| added > 0) {
+            self.toast(msg);
         }
         self.pump_thumbs();
         self.update();
@@ -316,40 +325,72 @@ impl App {
         for it in self.items.borrow().iter().filter(|i| !i.busy()) {
             it.set_target(ext);
         }
+        // Remember it as the default for the kinds whose own formats include it.
         let mut c = self.config.borrow_mut();
-        if formats::targets(Kind::Image).contains(&ext) {
-            c.image_target = ext.into();
+        for (kind, t) in formats::all_targets() {
+            if t == ext {
+                match kind {
+                    Kind::Image => c.image_target = ext.into(),
+                    Kind::Audio => c.audio_target = ext.into(),
+                    Kind::Video => c.video_target = ext.into(),
+                }
+            }
+        }
+    }
+
+    /// The first converter that a file in the list needs but is not installed.
+    fn missing_tool(&self) -> Option<&'static str> {
+        let items = self.items.borrow();
+        if self.tools.vips.is_none() && items.iter().any(|i| i.kind == Kind::Image) {
+            return Some(tr("vips is not installed"));
+        }
+        if (self.tools.ffmpeg.is_none() || self.tools.ffprobe.is_none()) && items.iter().any(|i| i.kind != Kind::Image) {
+            return Some(tr("ffmpeg is not installed"));
+        }
+        None
+    }
+
+    fn can_run(&self, item: &Item) -> bool {
+        if formats::uses_vips(item.kind, item.target()) {
+            self.tools.vips.is_some()
+        } else {
+            self.tools.ffmpeg.is_some() && self.tools.ffprobe.is_some()
         }
     }
 
     fn convert_all(self: &Rc<Self>) {
-        if self.tools.vips.is_none() {
-            self.toast(tr("vips is not installed"));
-            return;
+        if let Some(msg) = self.missing_tool() {
+            self.toast(msg);
         }
         for it in self.items.borrow().iter().filter(|i| matches!(i.state.get(), State::Idle | State::Failed)) {
-            it.set_state(State::Queued);
+            if self.can_run(it) {
+                it.set_state(State::Queued);
+            }
         }
         self.pump();
         self.update();
     }
 
     fn pump(self: &Rc<Self>) {
-        let jobs = self.config.borrow().jobs as usize;
+        let (jobs, video_jobs) = {
+            let c = self.config.borrow();
+            (c.jobs as usize, c.video_jobs as usize)
+        };
         while self.running.get() < jobs {
-            let next = self.items.borrow().iter().find(|i| i.state.get() == State::Queued).cloned();
+            // Video encoders already use every core, so they get their own, smaller limit.
+            let video_full = self.running_video.get() >= video_jobs;
+            let next = self.items.borrow().iter().find(|i| i.state.get() == State::Queued && !(video_full && heavy(i))).cloned();
             let Some(item) = next else { break };
             self.start(item);
         }
     }
 
     fn start(self: &Rc<Self>, item: Rc<Item>) {
-        let Some(vips) = self.tools.vips.clone() else { return };
         let target = item.target();
-        let (dir, opts) = {
+        let (dir, image_opts, media_opts) = {
             let c = self.config.borrow();
             let dir = c.output_dir.clone().filter(|d| d.is_dir()).or_else(|| item.path.parent().map(Path::to_path_buf)).unwrap_or_default();
-            (dir, ImageOptions { quality: c.image_quality, keep_metadata: c.keep_metadata })
+            (dir, ImageOptions { quality: c.image_quality, keep_metadata: c.keep_metadata }, c.media_options())
         };
         let dst = {
             let reserved = self.reserved.borrow();
@@ -357,23 +398,33 @@ impl App {
         };
         self.reserved.borrow_mut().insert(dst.clone());
         let tmp = convert::temp_path(&dst, item.id);
-        let argv = match item.kind {
-            Kind::Image => convert::image_argv(&vips, &item.path, &tmp, target, &opts),
-        };
+        let is_heavy = heavy(&item);
 
         item.cancelled.set(false);
         item.set_state(State::Running);
         self.running.set(self.running.get() + 1);
+        if is_heavy {
+            self.running_video.set(self.running_video.get() + 1);
+        }
         self.update();
 
         let app = self.clone();
         glib::spawn_future_local(async move {
-            let result = run(&item, &argv).await.and_then(|()| finish(&tmp, &dst));
+            let result = if formats::uses_vips(item.kind, target) {
+                let vips = app.tools.vips.clone().unwrap_or_default();
+                run(Some(&item), &convert::image_argv(&vips, &item.path, &tmp, target, &image_opts)).await.map(drop)
+            } else {
+                app.convert_media(&item, &tmp, target, &media_opts).await
+            };
+            let result = result.and_then(|()| finish(&tmp, &dst));
             if tmp.exists() {
                 let _ = std::fs::remove_file(&tmp);
             }
             app.reserved.borrow_mut().remove(&dst);
             app.running.set(app.running.get() - 1);
+            if is_heavy {
+                app.running_video.set(app.running_video.get() - 1);
+            }
             match result {
                 Ok(out) => {
                     item.output.replace(Some(out));
@@ -390,33 +441,69 @@ impl App {
         });
     }
 
+    async fn probe(&self, item: &Item) -> Result<Probe, String> {
+        if let Some(p) = item.probe.borrow().clone() {
+            return Ok(p);
+        }
+        let ffprobe = self.tools.ffprobe.clone().ok_or_else(|| tr("ffmpeg is not installed").to_string())?;
+        let out = run(None, &media::probe_argv(&ffprobe, &item.path)).await?;
+        let p = media::parse_probe(&out);
+        item.set_probe(p.clone());
+        Ok(p)
+    }
+
+    async fn convert_media(&self, item: &Rc<Item>, tmp: &Path, target: &str, opts: &media::MediaOptions) -> Result<(), String> {
+        let probe = self.probe(item).await?;
+        let ffmpeg = self.tools.ffmpeg.clone().ok_or_else(|| tr("ffmpeg is not installed").to_string())?;
+        let argv = media::ffmpeg_argv(&ffmpeg, &item.path, tmp, item.kind, target, opts, &probe)?;
+        if item.cancelled.get() {
+            return Err(tr("Cancelled").into());
+        }
+        run_ffmpeg(item, &argv, probe.duration).await
+    }
+
+    /// Probes media files and renders card thumbnails, a couple at a time.
     fn pump_thumbs(self: &Rc<Self>) {
-        let Some(vips) = self.tools.vips.clone() else { return };
         while self.thumbs_running.get() < THUMB_JOBS {
             let next = self.thumbs.borrow_mut().pop_front();
             let Some(weak) = next else { break };
             let Some(item) = weak.upgrade() else { continue };
-            let cache = thumb_path(&item.path);
-            if cache.exists() {
-                item.set_thumbnail(&cache);
-                continue;
-            }
-            if let Some(d) = cache.parent() {
-                let _ = std::fs::create_dir_all(d);
-            }
-            let tmp = convert::temp_path(&cache, item.id);
-            let argv = convert::thumbnail_argv(&vips, &item.path, &tmp, THUMB_SIZE);
             self.thumbs_running.set(self.thumbs_running.get() + 1);
             let app = self.clone();
             glib::spawn_future_local(async move {
-                if run(&item, &argv).await.and_then(|()| finish_exact(&tmp, &cache)).is_ok() {
-                    item.set_thumbnail(&cache);
-                }
-                let _ = std::fs::remove_file(&tmp);
+                app.prepare(&item).await;
                 app.thumbs_running.set(app.thumbs_running.get() - 1);
                 app.pump_thumbs();
             });
         }
+    }
+
+    async fn prepare(&self, item: &Item) {
+        let probe = match item.kind {
+            Kind::Image => None,
+            _ => match self.probe(item).await {
+                Ok(p) => Some(p),
+                Err(_) => return,
+            },
+        };
+        let cache = thumb_path(&item.path);
+        if cache.exists() {
+            item.set_thumbnail(&cache);
+            return;
+        }
+        if let Some(d) = cache.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let tmp = convert::temp_path(&cache, item.id);
+        let argv = match (&probe, &self.tools.vips, &self.tools.ffmpeg) {
+            (None, Some(vips), _) => convert::thumbnail_argv(vips, &item.path, &tmp, THUMB_SIZE),
+            (Some(p), _, Some(ffmpeg)) if p.has_video || p.has_cover => media::thumbnail_argv(ffmpeg, &item.path, &tmp, THUMB_SIZE, p),
+            _ => return,
+        };
+        if run(None, &argv).await.and_then(|_| finish_exact(&tmp, &cache)).is_ok() {
+            item.set_thumbnail(&cache);
+        }
+        let _ = std::fs::remove_file(&tmp);
     }
 
     fn update(&self) {
@@ -425,12 +512,16 @@ impl App {
         self.clear_btn.set_visible(!items.is_empty());
         let todo = items.iter().filter(|i| matches!(i.state.get(), State::Idle | State::Failed)).count();
         let done = items.iter().filter(|i| i.state.get() == State::Done).count();
-        let busy = items.iter().filter(|i| i.busy()).count();
+        let running = items.iter().filter(|i| i.state.get() == State::Running).count();
+        let queued = items.iter().filter(|i| i.state.get() == State::Queued).count();
         self.convert_btn.set_sensitive(todo > 0);
         self.set_all.set_sensitive(items.iter().any(|i| !i.busy()));
         let mut parts = vec![tr("{} files").replace("{}", &items.len().to_string())];
-        if busy > 0 {
-            parts.push(tr("{} in progress").replace("{}", &busy.to_string()));
+        if running > 0 {
+            parts.push(tr("{} in progress").replace("{}", &running.to_string()));
+        }
+        if queued > 0 {
+            parts.push(tr("{} queued").replace("{}", &queued.to_string()));
         }
         if done > 0 {
             parts.push(tr("{} done").replace("{}", &done.to_string()));
@@ -450,7 +541,7 @@ impl App {
             .developer_name("wioletowa")
             .version(env!("CARGO_PKG_VERSION"))
             .license_type(gtk::License::MitX11)
-            .comments(tr("Convert images on your computer. Inspired by VERT."))
+            .comments(tr("Convert images, audio and video on your computer. Inspired by VERT."))
             .build();
         about.add_legal_section(
             "VERT",
@@ -463,6 +554,12 @@ impl App {
             Some("© John Cupitt and others"),
             gtk::License::Lgpl21,
             Some(tr("Morph runs the vips command-line tool for image conversion; it is not linked into Morph.")),
+        );
+        about.add_legal_section(
+            "FFmpeg",
+            Some("© the FFmpeg developers"),
+            gtk::License::Lgpl21,
+            Some(tr("Morph runs the ffmpeg and ffprobe programs for audio and video; they are not linked into Morph. Depending on how your copy was built, its license may be the GPL.")),
         );
         about.present(Some(&self.window));
     }
@@ -500,20 +597,72 @@ impl App {
     }
 }
 
-async fn run(item: &Item, argv: &[OsString]) -> Result<(), String> {
-    let launcher = gio::SubprocessLauncher::new(gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_PIPE);
+/// Runs a converter to completion and returns its stdout. With `item`, the process can be
+/// cancelled from the card.
+async fn run(item: Option<&Item>, argv: &[OsString]) -> Result<String, String> {
+    let launcher = gio::SubprocessLauncher::new(gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_PIPE);
+    let args: Vec<&OsStr> = argv.iter().map(OsString::as_os_str).collect();
+    let p = launcher.spawn(&args).map_err(|e| e.message().to_string())?;
+    if let Some(item) = item {
+        item.proc.replace(Some(p.clone()));
+    }
+    let out = p.communicate_utf8_future(None).await;
+    if let Some(item) = item {
+        item.proc.take();
+    }
+    let (stdout, err) = out.map_err(|e| e.message().to_string())?;
+    if p.is_successful() {
+        Ok(stdout.map(Into::into).unwrap_or_default())
+    } else {
+        Err(error_text(err.as_deref().unwrap_or("")))
+    }
+}
+
+/// Runs ffmpeg with `-progress pipe:1`, updating the card as blocks arrive.
+async fn run_ffmpeg(item: &Rc<Item>, argv: &[OsString], duration: Option<f64>) -> Result<(), String> {
+    let launcher = gio::SubprocessLauncher::new(gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_PIPE);
     let args: Vec<&OsStr> = argv.iter().map(OsString::as_os_str).collect();
     let p = launcher.spawn(&args).map_err(|e| e.message().to_string())?;
     item.proc.replace(Some(p.clone()));
-    let out = p.communicate_utf8_future(None).await;
-    item.proc.take();
-    let (_, err) = out.map_err(|e| e.message().to_string())?;
-    if p.is_successful() {
-        Ok(())
-    } else {
-        let msg = convert::clean_stderr(err.as_deref().unwrap_or(""));
-        Err(if msg.is_empty() { tr("the converter exited with an error").to_string() } else { msg })
+
+    // stderr is drained concurrently so a chatty ffmpeg never blocks on a full pipe.
+    let err_stream = gio::DataInputStream::new(&p.stderr_pipe().expect("stderr is piped"));
+    let stderr = glib::spawn_future_local(async move {
+        let mut text = String::new();
+        while let Ok(Some(line)) = err_stream.read_line_utf8_future(glib::Priority::DEFAULT).await {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        text
+    });
+
+    let out = gio::DataInputStream::new(&p.stdout_pipe().expect("stdout is piped"));
+    let mut prog = media::Progress::default();
+    while let Ok(Some(line)) = out.read_line_utf8_future(glib::Priority::DEFAULT).await {
+        if media::progress_line(&line, &mut prog) {
+            let fraction = duration.map(|d| prog.seconds / d);
+            let eta = match (duration, prog.speed) {
+                (Some(d), Some(s)) if prog.seconds > 0.0 => Some((d - prog.seconds) / s),
+                _ => None,
+            };
+            item.show_progress(fraction, eta, prog.speed);
+        }
     }
+    let waited = p.wait_future().await;
+    item.proc.take();
+    let err = stderr.await.unwrap_or_default();
+    waited.map_err(|e| e.message().to_string())?;
+    if p.is_successful() { Ok(()) } else { Err(error_text(&err)) }
+}
+
+fn error_text(stderr: &str) -> String {
+    let msg = convert::clean_stderr(stderr);
+    if msg.is_empty() { tr("the converter exited with an error").to_string() } else { msg }
+}
+
+/// Encodes video frames, as opposed to audio or still images.
+fn heavy(item: &Item) -> bool {
+    !formats::uses_vips(item.kind, item.target()) && !formats::is_audio_target(item.target())
 }
 
 /// Moves the finished temp file to `dst`, or to the next free name if something appeared there meanwhile.
