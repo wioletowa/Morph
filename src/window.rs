@@ -72,19 +72,19 @@ impl App {
 
         let choose = gtk::Button::builder().label(tr("Choose Files…")).halign(gtk::Align::Center).css_classes(["pill", "suggested-action"]).build();
         choose.set_action_name(Some("win.add"));
-        let mut description = tr("Images, audio and video are converted on this computer. Nothing is uploaded.").to_string();
+        // Only warnings go under the title; with every tool present it stays empty.
+        let mut missing = Vec::new();
         if tools.vips.is_none() {
-            description += "\n";
-            description += tr("vips is not installed, so images cannot be converted. Install the libvips package.");
+            missing.push(tr("vips is not installed, so images cannot be converted. Install the libvips package."));
         }
         if tools.ffmpeg.is_none() || tools.ffprobe.is_none() {
-            description += "\n";
-            description += tr("ffmpeg is not installed, so audio and video cannot be converted. Install the ffmpeg package.");
+            missing.push(tr("ffmpeg is not installed, so audio and video cannot be converted. Install the ffmpeg package."));
         }
+        let description = missing.join("\n");
         let empty = adw::StatusPage::builder()
             .icon_name("document-send-symbolic")
             .title(tr("Drop Files to Convert"))
-            .description(&description)
+            .description(description)
             .child(&choose)
             .build();
 

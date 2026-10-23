@@ -29,9 +29,6 @@ pub fn tr(en: &'static str) -> &'static str {
         "Main Menu" => "Главное меню",
         "Clear List" => "Очистить список",
         "Choose Files…" => "Выбрать файлы…",
-        "Files are converted on this computer. Nothing is uploaded." => {
-            "Файлы конвертируются на этом компьютере. Ничего никуда не загружается."
-        }
         "vips is not installed, so images cannot be converted. Install the libvips package." => {
             "vips не установлен, конвертировать изображения нельзя. Установите пакет libvips."
         }
@@ -102,9 +99,6 @@ pub fn tr(en: &'static str) -> &'static str {
         "ffmpeg is not installed" => "ffmpeg не установлен",
         "ffmpeg is not installed, so audio and video cannot be converted. Install the ffmpeg package." => {
             "ffmpeg не установлен, конвертировать аудио и видео нельзя. Установите пакет ffmpeg."
-        }
-        "Images, audio and video are converted on this computer. Nothing is uploaded." => {
-            "Изображения, аудио и видео конвертируются на этом компьютере. Ничего никуда не загружается."
         }
         "Convert images, audio and video on your computer. Inspired by VERT." => {
             "Конвертирует изображения, аудио и видео на вашем компьютере. Вдохновлено VERT."
