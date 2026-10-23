@@ -24,6 +24,15 @@
       Morph is an independent program inspired by VERT. It runs vips and ffmpeg to do the conversions.
     </p>
   </description>
+  <url type="homepage">https://github.com/wioletowa/Morph</url>
+  <url type="bugtracker">https://github.com/wioletowa/Morph/issues</url>
+  <url type="vcs-browser">https://github.com/wioletowa/Morph</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/wioletowa/Morph/main/docs/screenshot.png</image>
+      <caption>Converting images, audio and video</caption>
+    </screenshot>
+  </screenshots>
   <launchable type="desktop-id">io.github.wioletowa.Morph.desktop</launchable>
   <provides>
     <binary>morph</binary>

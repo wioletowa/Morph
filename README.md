@@ -1,48 +1,47 @@
 # Morph
 
-A native file converter for the GNOME desktop. Drop files in, pick a format, convert — on your own
-computer, with nothing uploaded. Built with Rust, GTK 4 and libadwaita.
+A native file converter for GNOME. Drop files in, pick a format, convert — locally, nothing is uploaded.
 
-- **Images** — PNG, JPEG, WebP, AVIF, HEIC, JPEG XL, GIF, TIFF, BMP. Also reads SVG, PSD, EXR and
-  camera RAW. Applies EXIF rotation, keeps GIF/WebP animation, can strip metadata.
-- **Audio** — MP3, FLAC, Ogg, Opus, WAV, M4A, AIFF. Keeps tags and album art.
-- **Video** — MP4, MKV, WebM, MOV, AVI, GIF, or any audio format to extract the soundtrack.
-  H.264, H.265 or AV1; keeps subtitles in MKV.
-- **GPU encoding** — NVIDIA NVENC or VAAPI (Intel, AMD). Morph test-encodes one frame with each
-  encoder at startup and only uses the ones that work; anything the GPU cannot do, or a GPU encode
-  that fails, runs on the CPU instead.
+![Morph main window](docs/screenshot.png)
 
-## Requirements
+- **Images** — PNG, JPEG, WebP, AVIF, HEIC, JPEG XL, GIF, TIFF, BMP (also reads SVG, PSD, RAW)
+- **Audio** — MP3, FLAC, Ogg, Opus, WAV, M4A, AIFF, keeping tags and album art
+- **Video** — MP4, MKV, WebM, MOV, AVI, GIF, or extract the soundtrack
+- **GPU encoding** — NVIDIA NVENC or VAAPI (Intel, AMD), with automatic fallback to the CPU
 
-- GTK ≥ 4.18 and libadwaita ≥ 1.7
-- `vips` (libvips) for images
-- `ffmpeg` and `ffprobe` for audio and video
-- Optional, for GPU encoding: the NVIDIA driver (NVENC), or a VA-API driver such as
-  `intel-media-driver` or Mesa's `libva-mesa-driver`
+## Install (Arch Linux)
 
-Morph looks for `vips`, `ffmpeg` and `ffprobe` next to its own binary (or in `../lib/morph`)
-first, then in `PATH`, so a build can ship its own copies.
-
-## Building
+Download `morph-converter-*.pkg.tar.zst` from [Releases](https://github.com/wioletowa/Morph/releases) and run:
 
 ```sh
+sudo pacman -U morph-converter-*.pkg.tar.zst
+```
+
+Or build the package yourself:
+
+```sh
+git clone https://github.com/wioletowa/Morph.git
+cd Morph
+makepkg -si
+```
+
+## Build from source
+
+Needs Rust, GTK ≥ 4.18, libadwaita ≥ 1.7, and at runtime `vips` and `ffmpeg`:
+
+```sh
+sudo pacman -S --needed rust gtk4 libadwaita libvips ffmpeg
 cargo build --release
 ./target/release/morph
 ```
 
-On Arch Linux, `makepkg -si` in this directory builds and installs the package from `PKGBUILD`.
+For GPU encoding install your GPU's driver: `nvidia-utils` (NVENC), `intel-media-driver` or `libva-mesa-driver` (VAAPI).
 
 ## Credits
 
-Morph is inspired by [VERT](https://vert.sh), the open-source file converter. It is an independent
-reimplementation of the idea: it contains no code, artwork or text from VERT and is not affiliated
-with the VERT authors.
-
-Conversions are done by external programs that Morph runs as separate processes; they are not
-linked into Morph and keep their own licenses:
-
-- [libvips](https://www.libvips.org) — LGPL-2.1-or-later
-- [FFmpeg](https://ffmpeg.org) — LGPL-2.1-or-later, or GPL depending on how it was built
+Inspired by [VERT](https://vert.sh). Morph is an independent program: it contains no code or artwork from VERT
+and is not affiliated with its authors. Conversions are done by [libvips](https://www.libvips.org) (LGPL-2.1+)
+and [FFmpeg](https://ffmpeg.org) (LGPL/GPL), run as separate programs.
 
 ## License
 
