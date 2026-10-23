@@ -76,7 +76,8 @@ pub fn vaapi_encoder(codec: &str) -> &'static str {
     }
 }
 
-/// Render nodes with the vendor name of the GPU behind each.
+/// Render nodes that may encode through VAAPI, with the vendor of the GPU behind each.
+/// NVIDIA's VA driver only decodes, and NVENC covers those cards anyway.
 pub fn render_nodes() -> Vec<(PathBuf, &'static str)> {
     let Ok(dir) = std::fs::read_dir("/dev/dri") else { return Vec::new() };
     let mut nodes: Vec<_> = dir
@@ -94,6 +95,7 @@ pub fn render_nodes() -> Vec<(PathBuf, &'static str)> {
             };
             (p, vendor)
         })
+        .filter(|(_, vendor)| *vendor != "NVIDIA")
         .collect();
     nodes.sort();
     nodes
